@@ -1,13 +1,13 @@
-name: Analysis (macOS) - Parallel Staggered Runs
+name: Analysis (macOS) - Parallel Runs # Updated name
 
 on:
   workflow_dispatch:
     inputs:
       num_runs:
-        description: 'Number of times to run the encode job in parallel with staggered starts'
+        description: 'Number of times to run the encode job in parallel' # Updated description
         required: true
         default: '1'
-        type: number 
+        type: number
       target_heights:
         description: 'Target resolutions (comma-separated, e.g., "720,1080")'
         required: true
@@ -80,67 +80,54 @@ on:
         type: string
 
 jobs:
-  generate_run_config: # New job to validate inputs and prepare matrix config
+  generate_run_matrix:
     runs-on: ubuntu-latest
     outputs:
-      indices_json: ${{ steps.generate_config.outputs.indices_json }}
-      num_runs_validated: ${{ steps.generate_config.outputs.num_runs_validated }}
+      run_ids: ${{ steps.generate_ids.outputs.ids_json }}
     steps:
-      - name: Generate run configuration
-        id: generate_config
+      - name: Generate run instance IDs
+        id: generate_ids
         run: |
-          count_str="${{ github.event.inputs.num_runs }}"
-          num_for_loop=1 # Default to 1 run if input is invalid
-
-          if [[ "$count_str" =~ ^[1-9][0-9]*$ ]]; then # Check if it's a positive integer string
-            echo "num_runs_validated=${count_str}" >> $GITHUB_OUTPUT
-            num_for_loop=$((count_str))
-          else
-            echo "Input num_runs ('${count_str}') is invalid. Defaulting to 1 run."
-            echo "num_runs_validated=1" >> $GITHUB_OUTPUT
+          count=${{ github.event.inputs.num_runs }}
+          if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
+            echo "Error: num_runs must be a positive integer."
+            exit 1
           fi
-          
           json_array="["
-          for i in $(seq 1 $num_for_loop); do
+          for i in $(seq 1 $count); do
             if [ $i -ne 1 ]; then
               json_array+=","
             fi
-            json_array+="$i"
+            json_array+="\"run${i}\""
           done
           json_array+="]"
-          echo "indices_json=${json_array}" >> $GITHUB_OUTPUT
+          echo "Generated JSON: $json_array"
+          echo "ids_json=${json_array}" >> "$GITHUB_OUTPUT"
 
   encode:
-    needs: generate_run_config # Depends on the new validation job
+    needs: generate_run_matrix
     runs-on: macos-latest
     timeout-minutes: 360
     strategy:
-      fail-fast: true 
-      max-parallel: ${{ needs.generate_run_config.outputs.num_runs_validated }} # Use validated output
+      fail-fast: true # If one run fails, cancel the rest. Set to 'false' to let all attempt.
+      # max-parallel: 1 # This line is removed (or you can set it to a number > 1, e.g., github.event.inputs.num_runs)
+      # By removing max-parallel, GitHub Actions will try to run all matrix jobs concurrently.
       matrix:
-        run_index: ${{ fromJson(needs.generate_run_config.outputs.indices_json) }}
+        run_instance: ${{ fromJson(needs.generate_run_matrix.outputs.run_ids) }}
     
     steps:
-      - name: Calculate and apply start delay for run${{ matrix.run_index }}
-        run: |
-          delay_seconds=$(( (${{ matrix.run_index }} - 1) * 30 ))
-          if [ $delay_seconds -gt 0 ]; then
-            echo "Run ${{ matrix.run_index }} (Index: ${{ matrix.run_index }}) starting after a calculated delay of ${delay_seconds} seconds."
-            sleep $delay_seconds
-          else
-            echo "Run ${{ matrix.run_index }} (Index: ${{ matrix.run_index }}, first run) starting immediately."
-          fi
-        shell: bash
-
       - name: Check out repository
         uses: actions/checkout@v4
         
-      - name: Set up workspace for run${{ matrix.run_index }}
+      - name: Set up workspace for ${{ matrix.run_instance }}
         run: |
-          echo "Starting run${{ matrix.run_index }}"
-          # IMPORTANT: If macos.sh writes to fixed file names in 'encoded_videos',
-          # parallel runs WILL CONFLICT. Ensure macos.sh uses CURRENT_RUN_INDEX or
-          # CURRENT_RUN_INSTANCE (passed via env) to create unique output files/subdirectories.
+          echo "Starting ${{ matrix.run_instance }}"
+          # IMPORTANT FOR PARALLEL RUNS: 
+          # If your macos.sh script writes output to fixed filenames within 'encoded_videos',
+          # parallel runs will overwrite each other's files if they share an output artifact path.
+          # Ensure your macos.sh script uses the CURRENT_RUN_INSTANCE environment variable
+          # to create unique output filenames or subdirectories for each parallel run.
+          # e.g., output to "encoded_videos/${{ matrix.run_instance }}/output.mp4"
           mkdir -p encoded_videos
           
       - name: Save macOS script from secret
@@ -150,14 +137,14 @@ jobs:
           SCRIPT_EOF
           chmod +x macos.sh
           
-      - name: Configure script with workflow inputs for run${{ matrix.run_index }}
-        env: 
-          CURRENT_RUN_INDEX: ${{ matrix.run_index }}
-          CURRENT_RUN_INSTANCE: run${{ matrix.run_index }} 
+      - name: Configure script with workflow inputs
+        env:
+          CURRENT_RUN_INSTANCE: ${{ matrix.run_instance }} # This is unique for each parallel job
         run: |
-          echo "Configuring script for run${{ matrix.run_index }} (Index: ${{ matrix.run_index }}) using workflow inputs..."
-          # Your macos.sh script should be designed to use CURRENT_RUN_INDEX or CURRENT_RUN_INSTANCE
-          # to create unique output filenames or paths if necessary to prevent conflicts.
+          echo "Configuring script for ${{ matrix.run_instance }} using workflow inputs..."
+          # The macos.sh script should be designed to use CURRENT_RUN_INSTANCE (e.g., "run1", "run2")
+          # to differentiate its outputs or behavior if multiple instances run in parallel.
+          # Example: modify macos.sh to write output to "encoded_videos/${CURRENT_RUN_INSTANCE}/"
 
           TARGET_HEIGHTS="${{ github.event.inputs.target_heights || '1080' }}"
           BITRATE_SPEC="${{ github.event.inputs.bitrate_spec || '290k' }}"
@@ -165,7 +152,7 @@ jobs:
           AUDIO_BITRATE="${{ github.event.inputs.audio_bitrate || '64k' }}"
           AUDIO_CHANNELS="${{ github.event.inputs.audio_channels || '1' }}"
           AUDIO_COMPRESSION_LEVEL="${{ github.event.inputs.audio_compression_level || '10' }}"
-          TEST_MODE_BOOL="${{ github.event.inputs.test_mode }}" 
+          TEST_MODE_BOOL="${{ github.event.inputs.test_mode }}"
           TEST_MODE=$([[ "$TEST_MODE_BOOL" == "true" ]] && echo "1" || echo "0")
           TEST_DURATION="${{ github.event.inputs.test_duration || '10' }}"
           TEST_START_TIME="${{ github.event.inputs.test_start_time || '0' }}"
@@ -182,16 +169,16 @@ jobs:
           sed -i '' "s/TEST_DURATION=10/TEST_DURATION=$TEST_DURATION/" macos.sh
           sed -i '' "s/TEST_START_TIME=0/TEST_START_TIME=$TEST_START_TIME/" macos.sh
 
-          echo "Script configuration complete for run${{ matrix.run_index }}."
+          echo "Script configuration complete for ${{ matrix.run_instance }}."
           
-      - name: Run encoder script on macOS for run${{ matrix.run_index }}
+      - name: Run encoder script on macOS for ${{ matrix.run_instance }}
         run: |
-          echo "Executing macos.sh for run${{ matrix.run_index }} (Index: ${{ matrix.run_index }})..."
-          bash macos.sh > /dev/null 2>&1 
-          echo "macos.sh execution finished for run${{ matrix.run_index }}."
+          echo "Executing macos.sh for ${{ matrix.run_instance }}..."
+          bash macos.sh > /dev/null 2>&1
+          echo "macos.sh execution finished for ${{ matrix.run_instance }}."
           
-      - name: Clean up workspace for run${{ matrix.run_index }}
+      - name: Clean up workspace for ${{ matrix.run_instance }}
         if: always()
         run: |
-          echo "Cleaning up macos.sh for run${{ matrix.run_index }}"
+          echo "Cleaning up macos.sh for ${{ matrix.run_instance }}"
           rm -f macos.sh
