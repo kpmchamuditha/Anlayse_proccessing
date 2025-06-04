@@ -1,10 +1,10 @@
-name: Analysis (macOS) - Parallel Runs # Updated name
+name: Analysis (macOS) - Parallel Staggered Runs # Updated name
 
 on:
   workflow_dispatch:
     inputs:
       num_runs:
-        description: 'Number of times to run the encode job in parallel' # Updated description
+        description: 'Number of times to run the encode job in parallel with staggered starts' # Updated description
         required: true
         default: '1'
         type: number
@@ -110,24 +110,48 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: true # If one run fails, cancel the rest. Set to 'false' to let all attempt.
-      # max-parallel: 1 # This line is removed (or you can set it to a number > 1, e.g., github.event.inputs.num_runs)
-      # By removing max-parallel, GitHub Actions will try to run all matrix jobs concurrently.
+      # max-parallel is intentionally omitted here to use GitHub's default parallelism,
+      # as this was part of your working parallel (non-staggered) setup.
       matrix:
-        run_instance: ${{ fromJson(needs.generate_run_matrix.outputs.run_ids) }}
+        run_instance: ${{ fromJson(needs.generate_run_matrix.outputs.run_ids) }} # e.g., "run1", "run2"
     
     steps:
+      - name: Calculate and apply start delay for ${{ matrix.run_instance }}
+        shell: bash
+        run: |
+          # Extract the numerical part from matrix.run_instance (e.g., "run1" -> 1, "run5" -> 5)
+          run_number_str=$(echo "${{ matrix.run_instance }}" | sed 's/run//')
+          
+          run_number=0
+          if [[ "$run_number_str" =~ ^[1-9][0-9]*$ ]]; then # Check if it's a positive integer
+            run_number=$((run_number_str))
+          else
+            echo "Warning: Could not parse a valid positive run number from '${{ matrix.run_instance }}'. Assuming index 1 (no delay)."
+            run_number=1 # Default to 1 (first instance) if parsing fails, leading to 0 delay
+          fi
+          
+          # Calculate delay: (run_number - 1) * 30 seconds
+          # This ensures the first run (run_number=1) has a 0s delay.
+          delay_seconds=$(( (run_number - 1) * 30 ))
+          
+          if [ $delay_seconds -gt 0 ]; then
+            echo "Run ${{ matrix.run_instance }} (parsed index: ${run_number}) starting after a calculated delay of ${delay_seconds} seconds."
+            sleep $delay_seconds
+          else
+            echo "Run ${{ matrix.run_instance }} (parsed index: ${run_number}) starting immediately (no calculated delay)."
+          fi
+
       - name: Check out repository
         uses: actions/checkout@v4
         
       - name: Set up workspace for ${{ matrix.run_instance }}
         run: |
-          echo "Starting ${{ matrix.run_instance }}"
+          echo "Starting actual setup for ${{ matrix.run_instance }}"
           # IMPORTANT FOR PARALLEL RUNS: 
           # If your macos.sh script writes output to fixed filenames within 'encoded_videos',
           # parallel runs will overwrite each other's files if they share an output artifact path.
           # Ensure your macos.sh script uses the CURRENT_RUN_INSTANCE environment variable
           # to create unique output filenames or subdirectories for each parallel run.
-          # e.g., output to "encoded_videos/${{ matrix.run_instance }}/output.mp4"
           mkdir -p encoded_videos
           
       - name: Save macOS script from secret
@@ -139,12 +163,11 @@ jobs:
           
       - name: Configure script with workflow inputs
         env:
-          CURRENT_RUN_INSTANCE: ${{ matrix.run_instance }} # This is unique for each parallel job
+          CURRENT_RUN_INSTANCE: ${{ matrix.run_instance }} # This is unique for each parallel job ("run1", "run2", etc.)
         run: |
           echo "Configuring script for ${{ matrix.run_instance }} using workflow inputs..."
-          # The macos.sh script should be designed to use CURRENT_RUN_INSTANCE (e.g., "run1", "run2")
+          # The macos.sh script should be designed to use CURRENT_RUN_INSTANCE 
           # to differentiate its outputs or behavior if multiple instances run in parallel.
-          # Example: modify macos.sh to write output to "encoded_videos/${CURRENT_RUN_INSTANCE}/"
 
           TARGET_HEIGHTS="${{ github.event.inputs.target_heights || '1080' }}"
           BITRATE_SPEC="${{ github.event.inputs.bitrate_spec || '290k' }}"
