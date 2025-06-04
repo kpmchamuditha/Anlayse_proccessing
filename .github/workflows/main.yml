@@ -80,44 +80,49 @@ on:
         type: string
 
 jobs:
-  generate_run_indices:
+  generate_run_config: # New job to validate inputs and prepare matrix config
     runs-on: ubuntu-latest
     outputs:
-      indices_json: ${{ steps.generate_indices.outputs.indices_json }}
+      indices_json: ${{ steps.generate_config.outputs.indices_json }}
+      num_runs_validated: ${{ steps.generate_config.outputs.num_runs_validated }}
     steps:
-      - name: Generate run indices
-        id: generate_indices
+      - name: Generate run configuration
+        id: generate_config
         run: |
-          count=${{ github.event.inputs.num_runs }}
-          if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
-            echo "Error: num_runs must be a positive integer."
-            exit 1
+          count_str="${{ github.event.inputs.num_runs }}"
+          num_for_loop=1 # Default to 1 run if input is invalid
+
+          if [[ "$count_str" =~ ^[1-9][0-9]*$ ]]; then # Check if it's a positive integer string
+            echo "num_runs_validated=${count_str}" >> $GITHUB_OUTPUT
+            num_for_loop=$((count_str))
+          else
+            echo "Input num_runs ('${count_str}') is invalid. Defaulting to 1 run."
+            echo "num_runs_validated=1" >> $GITHUB_OUTPUT
           fi
+          
           json_array="["
-          for i in $(seq 1 $count); do
+          for i in $(seq 1 $num_for_loop); do
             if [ $i -ne 1 ]; then
               json_array+=","
             fi
-            json_array+="$i" # Output numerical indices: [1, 2, 3, ...]
+            json_array+="$i"
           done
           json_array+="]"
-          echo "Generated JSON: $json_array"
-          echo "indices_json=${json_array}" >> "$GITHUB_OUTPUT"
+          echo "indices_json=${json_array}" >> $GITHUB_OUTPUT
 
   encode:
-    needs: generate_run_indices
+    needs: generate_run_config # Depends on the new validation job
     runs-on: macos-latest
     timeout-minutes: 360
     strategy:
-      fail-fast: true # Consider setting to 'false' if all runs should attempt completion
-      max-parallel: ${{ toNumber(github.event.inputs.num_runs) }} # Corrected: Use toNumber to ensure integer type
+      fail-fast: true 
+      max-parallel: ${{ needs.generate_run_config.outputs.num_runs_validated }} # Use validated output
       matrix:
-        run_index: ${{ fromJson(needs.generate_run_indices.outputs.indices_json) }} # Use numerical index, e.g., 1, 2, 3...
+        run_index: ${{ fromJson(needs.generate_run_config.outputs.indices_json) }}
     
     steps:
       - name: Calculate and apply start delay for run${{ matrix.run_index }}
         run: |
-          # Calculate delay: (run_index - 1) * 30 seconds
           delay_seconds=$(( (${{ matrix.run_index }} - 1) * 30 ))
           if [ $delay_seconds -gt 0 ]; then
             echo "Run ${{ matrix.run_index }} (Index: ${{ matrix.run_index }}) starting after a calculated delay of ${delay_seconds} seconds."
@@ -136,8 +141,6 @@ jobs:
           # IMPORTANT: If macos.sh writes to fixed file names in 'encoded_videos',
           # parallel runs WILL CONFLICT. Ensure macos.sh uses CURRENT_RUN_INDEX or
           # CURRENT_RUN_INSTANCE (passed via env) to create unique output files/subdirectories.
-          # For example, you might want to do: mkdir -p "encoded_videos/run${{ matrix.run_index }}"
-          # and have macos.sh write into that specific subdirectory.
           mkdir -p encoded_videos
           
       - name: Save macOS script from secret
@@ -150,14 +153,11 @@ jobs:
       - name: Configure script with workflow inputs for run${{ matrix.run_index }}
         env: 
           CURRENT_RUN_INDEX: ${{ matrix.run_index }}
-          CURRENT_RUN_INSTANCE: run${{ matrix.run_index }} # For script if it expects "runX" format
+          CURRENT_RUN_INSTANCE: run${{ matrix.run_index }} 
         run: |
           echo "Configuring script for run${{ matrix.run_index }} (Index: ${{ matrix.run_index }}) using workflow inputs..."
           # Your macos.sh script should be designed to use CURRENT_RUN_INDEX or CURRENT_RUN_INSTANCE
           # to create unique output filenames or paths if necessary to prevent conflicts.
-          # For example, by modifying a variable within macos.sh like:
-          # sed -i '' "s/unique_output_id=\"\"/unique_output_id=\"_run${CURRENT_RUN_INDEX}\"/" macos.sh
-          # Or by adjusting output paths to "encoded_videos/run${CURRENT_RUN_INDEX}/file.mp4"
 
           TARGET_HEIGHTS="${{ github.event.inputs.target_heights || '1080' }}"
           BITRATE_SPEC="${{ github.event.inputs.bitrate_spec || '290k' }}"
@@ -187,7 +187,6 @@ jobs:
       - name: Run encoder script on macOS for run${{ matrix.run_index }}
         run: |
           echo "Executing macos.sh for run${{ matrix.run_index }} (Index: ${{ matrix.run_index }})..."
-          # Consider removing > /dev/null 2>&1 during testing to see output/errors
           bash macos.sh > /dev/null 2>&1 
           echo "macos.sh execution finished for run${{ matrix.run_index }}."
           
