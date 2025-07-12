@@ -109,7 +109,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 360
     strategy:
-      fail-fast: true # If one run fails, cancel the rest. Set to 'false' to let all attempt.
+      fail-fast: false # If one run fails, cancel the rest. Set to 'false' to let all attempt.
       # max-parallel: 1 # This line is removed (or you can set it to a number > 1, e.g., github.event.inputs.num_runs)
       # By removing max-parallel, GitHub Actions will try to run all matrix jobs concurrently.
       matrix:
